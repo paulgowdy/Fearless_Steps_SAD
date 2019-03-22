@@ -1,24 +1,16 @@
-import glob
 import re
 from scipy.io.wavfile import read
 from scipy import signal
 import numpy as np
-import matplotlib.pyplot as plt
+import h5py
 import pickle
+import random
 
 def sorted_nicely( l ):
     """ Sort the given iterable in the way that humans expect."""
     convert = lambda text: int(text) if text.isdigit() else text
     alphanum_key = lambda key: [ convert(c) for c in re.split('([0-9]+)', key) ]
     return sorted(l, key = alphanum_key)
-
-def indices_to_one_hot(data, nb_classes):
-    """Convert an iterable of indices to one-hot encoded labels."""
-    targets = np.array(data).reshape(-1)
-    return np.eye(nb_classes)[targets]
-
-#sample_transcript = transcript_files[0]
-#sample_audio = audio_files[0]
 
 def read_transcript_file(transcript_fn):
 
@@ -48,7 +40,7 @@ def read_audio_file_to_spect(audio_fn):
 
     f, t, Sxx = signal.spectrogram(sample_wav[1], fs, mode = 'complex')
 
-    return f,t, np.abs(Sxx)
+    return f,t, np.abs(Sxx), sample_wav[1]
 
 def intervals_to_labels(time_bins, intervals):
 
@@ -89,180 +81,156 @@ def intervals_to_labels(time_bins, intervals):
 
     return np.clip(np.array(labels), 0, 1)
 
-'''
-def spect_chop_labels(labels, spect, window_time_width = 4, freq_start = 10, window_freq_height = 60):
+def generate_batches_from_hdf5(hdf5_fn, file_inds, batch_size = 16, spect_length = 100):
 
-    if len(labels) != spect.shape[1]:
+	mean_fn = 'SAD_data/mean.p'
 
-        print("Shapes dont match!")
-        print(labels.shape)
-        print(spect.shape)
-        return "Error!"
+	with open(mean_fn, 'rb') as f:
 
-    spect_slices = []
+		means = pickle.load(f)
 
-    for i in range(len(labels) - window_time_width + 1):
+	with h5py.File(hdf5_fn, 'r') as hf:
 
-        spect_slice = spect[freq_start : window_freq_height, i : i + window_time_width]
+		while 1:
 
-        ss = spect_slice.flatten()
+			spects = []
+			labels = []
+			sample_weights = []
 
-        spect_slices.append(ss)
+			for _ in range(batch_size):
 
-    return np.array(spect_slices), labels[: - window_time_width + 1]
-'''
+				#fn_ind = random.randint(1,top_file_ind)
 
-def spect_chop_labels(labels, spect, window_time_width = 4, freq_start = 0, window_freq_height = 60):
+				fn_ind = random.choice(file_inds)
 
-    if len(labels) != spect.shape[1]:
+				s = hf['spects']['spect_' + str(fn_ind)]
+				l = hf['labels']['labels_' + str(fn_ind)]
 
-        print("Shapes dont match!")
-        print(labels.shape)
-        print(spect.shape)
-        return "Error!"
+				max_len = s.shape[1]
 
-    spect_slices = []
-    new_labels = []
+				pos_ind = random.randint(0, max_len - spect_length - 1)
 
-    for i in range(len(labels) - window_time_width + 1):
+				spect = s[:, pos_ind : pos_ind + spect_length]
+				label = l[pos_ind : pos_ind + spect_length]
 
-        c_label =  labels[i]
+				spect = (spect.transpose() - means).transpose()
+				spect = np.expand_dims(spect, -1)
 
-        spect_slice = spect[freq_start : window_freq_height, i : i + window_time_width]
-        ss = spect_slice
-        #ss = spect_slice.flatten()
+				sample_weight = 1.0 + 2.0 * np.mean(label)
 
-        spect_slices.append(ss)
-        new_labels.append(c_label)
+				#print(sample_weight)
 
-        if c_label == 1:
+				spects.append(spect)
+				labels.append(label)
+				sample_weights.append(sample_weight)
 
-            for _ in range(3):
+			spects = np.array(spects)
+			labels = np.array(labels)
+			sample_weights = np.array(sample_weights)
 
-                spect_slices.append(ss)
-                new_labels.append(c_label)
+			#print(spects.shape, labels.shape)
 
+			yield (spects, labels, sample_weights)
 
+def sequential_from_hdf5(hdf5_fn, fn_ind, spect_length = 100, nb_spects = 100, step_size = 50):
 
-    return np.array(spect_slices), new_labels
+	mean_fn = 'SAD_data/mean.p'
 
-def fn_to_data(transcript_fn, audio_fn):
+	with open(mean_fn, 'rb') as f:
 
-    intervals = read_transcript_file(transcript_fn)
+		means = pickle.load(f)
 
-    f, t, S = read_audio_file_to_spect(audio_fn)
+	with h5py.File(hdf5_fn, 'r') as hf:
 
-    labelz = intervals_to_labels(t, intervals)
+		s = hf['spects']['spect_' + str(fn_ind)]
+		l = hf['labels']['labels_' + str(fn_ind)]
 
-    spect_chops, trunc_labels = spect_chop_labels(labelz, S, window_time_width = 20, window_freq_height = 60)
+		pos_ind = 0
 
-    # one_hot_encode labels...
 
-    ohe_labels = indices_to_one_hot(trunc_labels, 2)
 
-    return spect_chops, ohe_labels
+		spects = []
+		labels = []
+		#sample_weights = []
 
-def create_all_data():
+		for _ in range(nb_spects):
 
-    transcript_files = sorted_nicely(glob.glob('Data/Transcripts/SAD/Dev/*.txt'))
+			#fn_ind = random.randint(1,top_file_ind)
 
-    audio_files = sorted_nicely(glob.glob('Data/Audio/Tracks/Dev/*.wav'))
+			#fn_ind = random.choice(file_inds)
 
-    x_train = []
-    y_train = []
+			#max_len = s.shape[1]
 
-    x_val = []
-    y_val = []
+			#pos_ind = random.randint(0, max_len - spect_length - 1)
 
-    for f in range(len(transcript_files)):
+			spect = s[:, pos_ind : pos_ind + spect_length]
+			label = l[pos_ind : pos_ind + spect_length]
 
-        print(f)
+			spect = (spect.transpose() - means).transpose()
+			spect = np.expand_dims(spect, -1)
 
-        trans_fn = transcript_files[f]
-        audio_fn = audio_files[f]
+			#sample_weight = 1.0 + 3.0 * np.mean(label)
 
-        spects, labels = fn_to_data(trans_fn, audio_fn)
+			#print(sample_weight)
 
-        if f % 10 == 0:
+			spects.append(spect)
+			labels.append(label)
+			#sample_weights.append(sample_weight)
 
-            x_val.extend(list(spects))
-            y_val.extend(list(labels))
+			pos_ind += step_size
 
-        else:
+		spects = np.array(spects)
+		labels = np.array(labels)
+		#sample_weights = np.array(sample_weights)
 
-            x_train.extend(list(spects))
-            y_train.extend(list(labels))
+			#print(spects.shape, labels.shape)
 
-    x_train = np.array(x_train)
-    y_train = np.array(y_train)
-
-    x_val = np.array(x_val)
-    y_val = np.array(y_val)
-
-    print(x_train.shape, y_train.shape)
-    print(x_val.shape, y_val.shape)
-
-    with open('pg_data/SAD/x_train.p', 'wb') as f:
-
-        pickle.dump(x_train[:2000000], f)
-
-    with open('pg_data/SAD/y_train.p', 'wb') as f:
-
-        pickle.dump(y_train[:2000000], f)
-
-    with open('pg_data/SAD/x_val.p', 'wb') as f:
-
-        pickle.dump(x_val[:250000], f)
-
-    with open('pg_data/SAD/y_val.p', 'wb') as f:
-
-        pickle.dump(y_val[:250000], f)
-
-
-
-
-
-
-
-#create_all_data()
-
-
-
-
-
-
-
-
-
+		return spects, labels
 
 
 
 '''
-plt.figure()
+def generate_batches_from_hdf5(hdf5_fn, file_inds, batch_size = 16, spect_length = 100):
 
-for i in range(10000):
+	mean_fn = 'SAD_data/mean.p'
 
-    plt.clf()
+	with open(mean_fn, 'rb') as f:
 
-    plt.plot(spect_chops[i])
-    plt.pause(0.1)
+		means = pickle.load(f)
 
-    print(trunc_labels[i])
+	with h5py.File(hdf5_fn, 'r') as hf:
 
+		while 1:
 
-plt.show()
-'''
+			spects = []
+			labels = []
 
+			for _ in range(batch_size):
 
-'''
-plt.figure()
-plt.plot(labelz[:800]*500, c = 'r')
+				#fn_ind = random.randint(1,top_file_ind)
 
+				fn_ind = random.choice(file_inds)
 
-plt.figure()
-plt.pcolormesh(t[:800], f[:60], np.abs(S[:60,:800]))
-#plt.plot(labelz[:800]*500, c = 'r')
-plt.ylabel('Frequency [Hz]')
-plt.xlabel('Time [sec]')
-plt.show()
+				s = hf['spects']['spect_' + str(fn_ind)]
+				l = hf['labels']['labels_' + str(fn_ind)]
+
+				max_len = s.shape[1]
+
+				pos_ind = random.randint(0, max_len - spect_length - 1)
+
+				spect = s[:, pos_ind : pos_ind + spect_length]
+				label = l[pos_ind : pos_ind + spect_length]
+
+				spect = (spect.transpose() - means).transpose()
+				spect = np.expand_dims(spect, -1)
+
+				spects.append(spect)
+				labels.append(label)
+
+			spects = np.array(spects)
+			labels = np.array(labels)
+
+			#print(spects.shape, labels.shape)
+
+			yield (spects, labels)
 '''
